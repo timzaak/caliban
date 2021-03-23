@@ -22,9 +22,16 @@ object Parser2 {
   private def sourceCharacter: P[Char]                      = P.charIn(Seq('\u0009', '\u000A','\u000D') ++ ('\u0020' to '\uFFFF'))
   private def sourceCharacterWithoutLineTerminator: P[Char] = P.charIn(Seq('\u0009')++ ('\u0020' to '\uFFFF'))
 
-  private def witespace: Parser0[Unit] = P.charIn(' ', '\t', '\n', '\b', '\uFEFF').rep0.void
-  private def wrapBrackets[T](t:Parser0[T]):P[T] = (P.char('{').surroundedBy(witespace)) *> t <* (P.char('}').surroundedBy(witespace))
-  //private implicit val whitespace: P[_] => P[Unit] = ???
+  private final val UnicodeBOM   = '\uFEFF'
+  private final val Tab          = '\u0009'
+  private final val Space        = '\u0020'
+  private final val LF           = '\u000A'
+  private final val CR           = '\u000D'
+  private def whitespace: Parser[_] = P.charIn(UnicodeBOM, Tab, Space, LF, CR)
+  private def comment:Parser[_] = P.charIn('#') ~ P.until(P.char(LF)|P.string(s"$CR$LF"))
+  private def whitespaces = (whitespace | comment).rep0.void
+  private def wrapBrackets[T](t:Parser0[T]):P[T] = (P.char('{').surroundedBy(whitespaces)) *> t <* (P.char('}').surroundedBy(whitespaces))
+  //private implicit val whitespace1 = P.charsWhile()
 /*
   private implicit val whitespace: P[_] => P[Unit] = new (P[_] => P[Unit]) {
 
@@ -152,7 +159,7 @@ object Parser2 {
   private def value: P[InputValue] =
     P.defer(floatValue | intValue | booleanValue | stringValue | nullValue | enumValue | listValue | objectValue | variable)
 
-  private def alias: P[String] = name <* P.char(':')
+  private def alias: P[String] = name.soft <* P.char(':')
 
   private def argument: P[(String, InputValue)]     = P.defer((name <* P.char(':')) ~ value)
   private def arguments: P[Map[String, InputValue]] = P.defer(P.char('(') *> argument.rep <* P.char(')')).map(v => v.toList.toMap)
@@ -200,7 +207,7 @@ object Parser2 {
 
   private def defaultValue: P[InputValue] = P.char('=') *> value
 
-  private def field: P[Field] = P.defer(((P.index ~ (alias.?)).with1 ~ name) ~ (arguments.? ~ directives.? ~ selectionSet.?)).map {
+  private def field: P[Field] = P.defer(((P.index ~ alias.?).with1 ~ name) ~ (arguments.? ~ directives.? ~ selectionSet.backtrack.?)).map {
     case (((index, alias), name), ((args, dirs), sels)) =>
       Field(
         alias,
@@ -531,7 +538,7 @@ object Parser2 {
   def parseQuery(query: String): IO[ParsingError, Document] = {
     val sm = SourceMapper(query)
     println("=====small====")
-    println(field.parse(query))
+    println(selectionSet.parse(query))
     document.parse(query) match {
       case Left(error) =>
         println("============ERROR============")

@@ -22,8 +22,14 @@ object Parser2Spec extends DefaultRunnableSpec {
   override def spec: ZSpec[TestEnvironment, Any] =
     suite("ParserSpec")(
       testM("hello world") {
-        val query = """hero""".stripMargin
-        //Parser.parseQuery(query)
+        val query =
+          """{
+            |hero {
+            |   name
+            |   # Queries can have comments!
+            | }
+            |}""".stripMargin
+        Parser.parseQuery(query)
         Parser2.parseQuery(query)
         println("finish")
         assertM(ZIO.succeed(true))(isTrue)

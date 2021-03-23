@@ -520,7 +520,7 @@ object Parser {
   def parseQuery(query: String): IO[ParsingError, Document] = {
     val sm = SourceMapper(query)
     println("=========small==1========")
-    println(parse(query, field(_)))
+    println(parse(query, selectionSet(_)))
     parse(query,document(_)) match {
       case Parsed.Success(value, _) =>
         println("=========success==1========")
