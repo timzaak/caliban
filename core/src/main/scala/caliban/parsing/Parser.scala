@@ -519,12 +519,18 @@ object Parser {
    */
   def parseQuery(query: String): IO[ParsingError, Document] = {
     val sm = SourceMapper(query)
-    Task(parse(query, document(_)))
-      .mapError(ex => ParsingError(s"Internal parsing error", innerThrowable = Some(ex)))
-      .flatMap {
-        case Parsed.Success(value, _) => IO.succeed(Document(value.definitions, sm))
-        case f: Parsed.Failure        => IO.fail(ParsingError(f.msg, Some(sm.getLocation(f.index))))
-      }
+    println("=========small==1========")
+    println(parse(query, field(_)))
+    parse(query,document(_)) match {
+      case Parsed.Success(value, _) =>
+        println("=========success==1========")
+        println(value)
+        IO.succeed(Document(value.definitions, sm))
+      case f: Parsed.Failure        =>
+        println("=========fail==1========")
+        println(f)
+        IO.fail(ParsingError(f.msg, Some(sm.getLocation(f.index))))
+    }
   }
 
   /**

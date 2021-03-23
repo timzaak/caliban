@@ -97,6 +97,7 @@ lazy val core = project
     testFrameworks := Seq(new TestFramework("zio.test.sbt.ZTestFramework")),
     libraryDependencies ++= Seq(
       "com.lihaoyi"       %% "fastparse"    % "2.3.1",
+      "org.typelevel"     %% "cats-parse"   % "0.3.1",
       "com.propensive"    %% "magnolia"     % magnoliaVersion,
       "com.propensive"    %% "mercator"     % mercatorVersion,
       "dev.zio"           %% "zio"          % zioVersion,
@@ -349,6 +350,7 @@ lazy val federation = project
   )
 
 val commonSettings = Def.settings(
+  transitiveClassifiers := Seq("sources"),
   scalacOptions ++= Seq(
     "-deprecation",
     "-encoding",
@@ -360,7 +362,7 @@ val commonSettings = Def.settings(
     "-language:existentials",
     "-unchecked",
     "-Xlint:_,-type-parameter-shadow",
-    "-Xfatal-warnings",
+    //"-Xfatal-warnings",
     "-Ywarn-numeric-widen",
     "-Ywarn-unused:patvars,-implicits",
     "-Ywarn-value-discard"
