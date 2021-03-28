@@ -27,98 +27,170 @@ object Parser2 {
   private final val Space        = '\u0020'
   private final val LF           = '\u000A'
   private final val CR           = '\u000D'
-  private def whitespace: Parser[_] = P.charIn(UnicodeBOM, Tab, Space, LF, CR)
+  private final val Comma        = ','
+  private def whitespace: Parser[_] = P.charIn(UnicodeBOM, Tab, Space, LF, CR, Comma)
   private def comment:Parser[_] = P.charIn('#') ~ P.until(P.char(LF)|P.string(s"$CR$LF"))
-  private def whitespaces = (whitespace | comment).rep0.void
-  private def wrapBrackets[T](t:Parser0[T]):P[T] = (P.char('{').surroundedBy(whitespaces)) *> t <* (P.char('}').surroundedBy(whitespaces))
-  //private implicit val whitespace1 = P.charsWhile()
-/*
-  private implicit val whitespace: P[_] => P[Unit] = new (P[_] => P[Unit]) {
+  private def whitespaceWithComment = (whitespace | comment).rep0.void
+  private def whitespaces:Parser0[Unit] =  whitespace.rep0.void
+  private def wrapBrackets[T](t:Parser0[T]):P[T] = P.char('{').surroundedBy(whitespaceWithComment) *> t <* (P.char('}').surroundedBy(whitespaceWithComment))
+  private def wrapParentheses[T](t:Parser0[T]):P[T] = P.char('(').surroundedBy(whitespaceWithComment) *> t <* (P.char(')').surroundedBy(whitespaceWithComment))
+  private def wrapSquareBrackets[T](t:Parser0[T]):P[T] = P.char('[').surroundedBy(whitespaceWithComment) *> t <* (P.char(']').surroundedBy(whitespaceWithComment))
+  private def wrapWhitespaces[T](t:Parser[T]):P[T] = t.surroundedBy(whitespaceWithComment)
+  private def wrapWhitespaces0[T](t:Parser0[T]):Parser0[T]= t.surroundedBy(whitespaceWithComment)
 
-    type State = Int
+  private object StringUtil {
+    private val decodeTable: Map[Char, Char] = Map(
+      ('\\', '\\'),
+      ('\'', '\''),
+      ('\"', '\"'),
+      ('b', 8.toChar), // backspace
+      ('f', 12.toChar), // form-feed
+      ('n', '\n'),
+      ('r', '\r'),
+      ('t', '\t')
+    )
 
-    // statuses
-    private final val Normal                  = 0
-    private final val InsideLineComment       = 1
-    private final val DetermineLineBreakStart = 2
+    private val encodeTable = decodeTable.iterator.map { case (v, k) => (k, s"\\$v") }.toMap
 
-    private final val UnicodeBOM   = '\uFEFF'
-    private final val Tab          = '\u0009'
-    private final val Space        = '\u0020'
-    private final val LF           = '\u000A'
-    private final val CR           = '\u000D'
-    private final val Comma        = ','
-    private final val CommentStart = '#'
+    private val nonPrintEscape: Array[String] =
+      (0 until 32).map { c =>
+        val strHex = c.toHexString
+        val strPad = List.fill(4 - strHex.length)('0').mkString
+        s"\\u$strPad$strHex"
+      }.toArray
 
-    override def apply(p: P[_]): P[Unit] =
-      loop(p.index, state = Normal)(p, p.input)
+    val escapedToken: P[Unit] = {
+      val escapes = P.charIn(decodeTable.keys.toSeq)
 
-    @tailrec def loop(index: Int, state: State)(implicit ctx: P[_], input: ParserInput): ParsingRun[Unit] =
-      if (input.isReachable(index)) {
-        val currentChar = input(index)
-        (state: @switch) match {
-          case Normal =>
-            (currentChar: @switch) match {
-              case Space | LF | Comma | Tab | UnicodeBOM => loop(index + 1, state = Normal)
-              case CommentStart                          => loop(index + 1, state = InsideLineComment)
-              case CR                                    => loop(index + 1, state = DetermineLineBreakStart)
-              case _                                     => ctx.freshSuccessUnit(index)
-            }
-          case InsideLineComment =>
-            loop(
-              index + 1,
-              state = (currentChar: @switch) match {
-                case CR => DetermineLineBreakStart
-                case LF => Normal
-                case _  => InsideLineComment
-              }
-            )
-          case DetermineLineBreakStart =>
-            (currentChar: @switch) match {
-              case LF => loop(index + 1, state = Normal)
-              case _  => loop(index, state = Normal)
-            }
+      val oct = P.charIn('0' to '7')
+      val octP = P.char('o') ~ oct ~ oct
+
+      val hex = P.charIn(('0' to '9') ++ ('a' to 'f') ++ ('A' to 'F'))
+      val hex2 = hex ~ hex
+      val hexP = P.char('x') ~ hex2
+
+      val hex4 = hex2 ~ hex2
+      val u4 = P.char('u') ~ hex4
+      val hex8 = hex4 ~ hex4
+      val u8 = P.char('U') ~ hex8
+
+      val after = P.oneOf[Any](escapes :: octP :: hexP :: u4 :: u8 :: Nil)
+      (P.char('\\') ~ after).void
+    }
+
+    /** String content without the delimiter
+     */
+    def undelimitedString(endP: P[Unit]): P[String] =
+      escapedToken.backtrack
+        .orElse((!endP).with1 ~ P.anyChar)
+        .rep
+        .string
+        .flatMap { str =>
+          unescape(str) match {
+            case Right(str1) => P.pure(str1)
+            case Left(_) => P.fail
+          }
         }
-      } else ctx.freshSuccessUnit(index)
+
+    private val simpleString: Parser0[String] =
+      P.charsWhile0(c => c >= ' ' && c != '"' && c != '\\')
+
+    def escapedString(q: Char): P[String] = {
+      val end: P[Unit] = P.char(q)
+      end *> ((simpleString <* end).backtrack
+        .orElse(undelimitedString(end) <* end))
+    }
+    def escape(quoteChar: Char, str: String): String = {
+      // We can ignore escaping the opposite character used for the string
+      // x isn't escaped anyway and is kind of a hack here
+      val ignoreEscape = if (quoteChar == '\'') '"' else if (quoteChar == '"') '\'' else 'x'
+      str.flatMap { c =>
+        if (c == ignoreEscape) c.toString
+        else
+          encodeTable.get(c) match {
+            case None =>
+              if (c < ' ') nonPrintEscape(c.toInt)
+              else c.toString
+            case Some(esc) => esc
+          }
+      }
+    }
+
+    def unescape(str: String): Either[Int, String] = {
+      val sb = new java.lang.StringBuilder
+      def decodeNum(idx: Int, size: Int, base: Int): Int = {
+        val end = idx + size
+        if (end <= str.length) {
+          val intStr = str.substring(idx, end)
+          val asInt =
+            try Integer.parseInt(intStr, base)
+            catch { case _: NumberFormatException => ~idx }
+          sb.append(asInt.toChar)
+          end
+        } else ~(str.length)
+      }
+      @annotation.tailrec
+      def loop(idx: Int): Int =
+        if (idx >= str.length) {
+          // done
+          idx
+        } else if (idx < 0) {
+          // error from decodeNum
+          idx
+        } else {
+          val c0 = str.charAt(idx)
+          if (c0 != '\\') {
+            sb.append(c0)
+            loop(idx + 1)
+          } else {
+            // str(idx) == \
+            val nextIdx = idx + 1
+            if (nextIdx >= str.length) {
+              // error we expect there to be a character after \
+              ~idx
+            } else {
+              val c = str.charAt(nextIdx)
+              decodeTable.get(c) match {
+                case Some(d) =>
+                  sb.append(d)
+                  loop(idx + 2)
+                case None =>
+                  c match {
+                    case 'o' => loop(decodeNum(idx + 2, 2, 8))
+                    case 'x' => loop(decodeNum(idx + 2, 2, 16))
+                    case 'u' => loop(decodeNum(idx + 2, 4, 16))
+                    case 'U' => loop(decodeNum(idx + 2, 8, 16))
+                    case other =>
+                      // \c is interpretted as just \c, if the character isn't escaped
+                      sb.append('\\')
+                      sb.append(other)
+                      loop(idx + 2)
+                  }
+              }
+            }
+          }
+        }
+
+      val res = loop(0)
+      if (res < 0) Left(~res)
+      else Right(sb.toString)
+    }
   }
-*/
-  //private def name: P[String] = P.defer(P.charIn("_A-Za-z") ~~ P.charIn("_0-9A-Za-z").repX).!
+
   private def name:P[String] = (P.charIn(('a' to 'z') ++ ('A' to 'Z') ++ Seq('_')) ~ P.charIn(('a' to 'z') ++ ('A' to 'Z') ++ Seq('_') ++ ('0' to '9')).rep0).string
 
 
   private def booleanValue: P[BooleanValue] =
     P.string("true").as(BooleanValue(true)) | P.string("false").as(BooleanValue(false))
 
-  //  private def negativeSign[_: P]: P[Unit] = P("-")
-  //  private def nonZeroDigit[_: P]: P[Unit] = P(CharIn("1-9"))
-  //  private def digit: P[Unit]        = P("0" | nonZeroDigit)
-  //  private def integerPart: P[Unit]  = Numbers.signedIntString
-  private def intValue: P[IntValue] = Numbers.signedIntString.map(IntValue(_))
-
-  //  private def sign: P1[Char]              = P.charIn("-+")
-  //  private def exponentIndicator: P1[Char] = P.charIn("eE")
-  //  private def exponentPart: P[String]     = string((exponentIndicator ~ sign.? ~ Numbers.nonNegativeIntString))
-  //  private def fractionalPart: P[String]   = ("." ~ Numbers.nonNegativeIntString).string
+  private def intValue: P[IntValue] = (Numbers.signedIntString <* (!P.char('.')).void).backtrack.map(IntValue(_))
 
   private def floatValue: P[FloatValue] = Numbers.jsonNumber.map(FloatValue(_))
 
-  //private def hexDigit: P[Char] = P.charIn("0-9a-fA-F")
-  private def escapedUnicode: P[Char] =
-    Rfc5234.hexdig.rep(4,4).string.map(Integer.parseInt(_, 16).toChar)
-
-  private def escapedCharacter: P[Char] = P.charIn('\b', '\n', '\f', '\r', '\t')
-
-  private def stringCharacter: P[Char] = {
-    sourceCharacterWithoutLineTerminator.filter(c => c!='\"' && c!='\\') |
-      (P.string("\\u")*> escapedUnicode) | (P.char('\\') *> escapedCharacter)
-  }
-
-  private def blockStringCharacter: P[String] = P.defer((P.string("\\\"\"\"").as("\"\"\""):P[String]) | (sourceCharacter.rep.string:P[String]))
-
   private def stringValue: P[StringValue] =
     P.defer(
-      (P.string("\"\"\"") *> ((!P.string("\"\"\"")) *> blockStringCharacter).map(s => blockStringValue(s)) <* P.string("\"\"\""))|
-        (P.string("\"") *> stringCharacter.rep.string <* P.string("\""))
+      (P.string("\"\"\"") *> StringUtil.undelimitedString(P.string("\"\"\"")).map(blockStringValue)<* P.string("\"\"\"")) |
+      StringUtil.escapedString('\"')
     ).map(v => StringValue(v))
 
   private def blockStringValue(rawValue: String): String = {
@@ -148,66 +220,67 @@ object Parser2 {
   private def enumValue: P[InputValue] = P.string(name).map(EnumValue)
 
   private def listValue: P[ListValue]  = P.defer(
-    value.repSep0(P.char(',')).with1.between(P.char('['), P.char(']')).map(values => ListValue(values))
+    wrapSquareBrackets(value.repSep0(whitespaceWithComment)).map(values => ListValue(values))
   )
 
 
-  private def objectField: P[(String, InputValue)] = P.defer((name <* P.char(':')) ~ value)
-  private def objectValue: P[ObjectValue] =
-    objectField.rep0.with1.between(P.char('{'), P.char('}')).map(values => ObjectValue(values.toMap))
+  private def objectField: P[(String, InputValue)] = P.defer((name <* wrapWhitespaces(P.char(':'))) ~ value)
+  private def objectValue: P[ObjectValue] = P.defer(
+    wrapBrackets(objectField.rep0).map(values => ObjectValue(values.toMap))
+  )
 
   private def value: P[InputValue] =
-    P.defer(floatValue | intValue | booleanValue | stringValue | nullValue | enumValue | listValue | objectValue | variable)
+    P.defer(P.oneOf(List(intValue, floatValue, booleanValue, stringValue, nullValue, enumValue, listValue, objectValue, variable)))
 
-  private def alias: P[String] = name.soft <* P.char(':')
+  private def alias: P[String] = name <* wrapWhitespaces(P.char(':'))
 
-  private def argument: P[(String, InputValue)]     = P.defer((name <* P.char(':')) ~ value)
-  private def arguments: P[Map[String, InputValue]] = P.defer(P.char('(') *> argument.rep <* P.char(')')).map(v => v.toList.toMap)
+  private def argument: P[(String, InputValue)]     = P.defer((name <* wrapWhitespaces(P.char(':'))) ~ value)
+  private def arguments: P[Map[String, InputValue]] = wrapParentheses(argument.repSep0(whitespaceWithComment)).map(v => v.toMap)
 
-  private def directive: P[Directive] = P.defer((P.index.with1 <* P.char('@')) ~ name ~ arguments.?).map{ case ((index, name), arguments) =>
+  private def directive: P[Directive] = P.defer(wrapWhitespaces(P.index.with1 <* P.char('@')).backtrack ~ name ~ arguments.backtrack.?).map{ case ((index, name), arguments) =>
     Directive(name, arguments.getOrElse(Map()), index)
   }
   private def directives: P[List[Directive]] = P.defer(directive.rep).map(_.toList)
 
-  private def selection: P[Selection]          = P.defer(field | fragmentSpread | inlineFragment)
+  private def selection: P[Selection]          = P.defer(wrapWhitespaces(field | fragmentSpread | inlineFragment))
   private def selectionSet: P[List[Selection]] =  wrapBrackets(selection.rep0).map(_.toList)
 
   private def namedType: P[NamedType] = name.filter(_ != "null").map(NamedType(_, nonNull = false))
-  private def listType: P[ListType]  = type_.between(P.char('['),P.char(']')).map(t => ListType(t, nonNull = false))
+  private def listType: P[ListType]  = wrapSquareBrackets(type_).map(t => ListType(t, nonNull = false))
 
   private def argumentDefinition: P[InputValueDefinition] =
-    P.defer((stringValue.?.with1 ~ name <* P.char(':')) ~ type_ ~ (defaultValue.? ~ directives.?)).map {
+    P.defer((stringValue.backtrack.?.with1 ~ name <* wrapWhitespaces(P.char(':'))) ~ type_ ~ (defaultValue.backtrack.? ~ directives.backtrack.?)).map {
       case (((description, name), type_), (defaultValue, directives)) =>
         InputValueDefinition(description.map(_.value), name, type_, defaultValue, directives.getOrElse(Nil))
     }
   private def argumentDefinitions: P[List[InputValueDefinition]] =
-    P.defer( argumentDefinition.rep.between(P.char('('),P.char(')'))).map(_.toList)
+    P.defer(wrapParentheses(argumentDefinition.rep)).map(_.toList)
 
   private def fieldDefinition: P[FieldDefinition] =
-    P.defer((stringValue.?.with1 ~ name ~ argumentDefinitions.? <* P.char(':')) ~ type_ ~ directives.?).map {
+    P.defer((wrapWhitespaces(stringValue).backtrack.?.with1 ~ name ~ argumentDefinitions.? <* wrapWhitespaces(P.char(':'))) ~ type_ ~ directives.backtrack.?).map {
       case ((((description, name), args), type_), directives) =>
         FieldDefinition(description.map(_.value), name, args.getOrElse(Nil), type_, directives.getOrElse(Nil))
     }
 
-  private def nonNullType: P[Type] = P.defer((namedType | listType) <* P.char('!')).map {
+  private def nonNullType: P[Type] = P.defer(((namedType | listType) <* P.char('!')).backtrack).map {
     case t: NamedType => t.copy(nonNull = true)
     case t: ListType  => t.copy(nonNull = true)
   }
   private def type_ :P[Type] = P.defer(nonNullType | namedType | listType)
 
-  private def variable: P[VariableValue] = (P.char('$')*> name).map(VariableValue)
+  private def variable: P[VariableValue] = (P.char('$')*>name).map(VariableValue)
   private def variableDefinitions: P[List[VariableDefinition]] = {
-    P.defer(variableDefinition.rep.between(P.char('('),P.char(')'))).map(_.toList)
+    P.defer(wrapParentheses(variableDefinition.repSep0(whitespaceWithComment)))//.map(_.toList)
   }
 
   private def variableDefinition: P[VariableDefinition] =
-    P.defer((variable <* P.char(':')) ~ type_ ~ defaultValue.? ~ directives).map {
-      case (((v, t), default), dirs) => VariableDefinition(v.name, t, default, dirs)
+    P.defer((variable <* wrapWhitespaces(P.char(':'))) ~ type_ ~ (defaultValue.backtrack.? ~ directives.backtrack.?)).map {
+      case ((v, t), (default, dirs)) => VariableDefinition(v.name, t, default, dirs.getOrElse(Nil))
     }
 
-  private def defaultValue: P[InputValue] = P.char('=') *> value
+  private def defaultValue: P[InputValue] = wrapWhitespaces(P.char('=')) *> value
 
-  private def field: P[Field] = P.defer(((P.index ~ alias.?).with1 ~ name) ~ (arguments.? ~ directives.? ~ selectionSet.backtrack.?)).map {
+  private def field: P[Field] = P.defer(((P.index ~ alias.backtrack.?).with1 ~ name) ~ (arguments.backtrack.? ~ directives.backtrack.? ~ selectionSet.backtrack.?)).map {
     case (((index, alias), name), ((args, dirs), sels)) =>
       Field(
         alias,
@@ -221,62 +294,66 @@ object Parser2 {
 
   private def fragmentName: P[String] = name.filter(_ != "on")
 
-  private def fragmentSpread: P[FragmentSpread] = P.defer(P.string("...") *> fragmentName ~ directives).map {
-    case (name, dirs) => FragmentSpread(name, dirs)
+//  private def fragmentSpread: P[FragmentSpread] = P.defer(P.string("...") *> fragmentName ~ directives).map {
+//    case (name, dirs) => FragmentSpread(name, dirs)
+//  }
+
+  private def fragmentSpread: P[FragmentSpread] = P.defer((P.string("...") *> fragmentName).backtrack ~ directives.backtrack.?).map {
+    case (name, dirs) => FragmentSpread(name, dirs.getOrElse(Nil))
   }
 
-  private def typeCondition: P[NamedType] = P.defer(P.string("on") *> namedType)
+  private def typeCondition: P[NamedType] = P.defer(wrapWhitespaces(P.string("on")) *> namedType)
 
-  private def inlineFragment: P[InlineFragment] = P.defer(P.string("...") *> typeCondition.?.with1 ~ directives ~ selectionSet).map {
-    case ((typeCondition, dirs), sel) => InlineFragment(typeCondition, dirs, sel)
+  private def inlineFragment: P[InlineFragment] = P.defer(wrapWhitespaces(P.string("...")) *> typeCondition.? ~ directives.backtrack.? ~ selectionSet).map {
+    case ((typeCondition, dirs), sel) => InlineFragment(typeCondition, dirs.getOrElse(Nil), sel)
   }
 
   private def operationType: P[OperationType] =
-    P.string("query").as(OperationType.Query) | P.string("mutation").as(OperationType.Mutation) | P.string("subscription").as(
+    wrapWhitespaces(P.string("query").as(OperationType.Query) | P.string("mutation").as(OperationType.Mutation) | P.string("subscription").as(
       OperationType.Subscription
-    )
+    ))
 
   private def operationDefinition: P[OperationDefinition] =
-    P.defer(operationType ~ (name.? ~ variableDefinitions.?) ~ directives ~ selectionSet).map {
+    (P.defer(operationType.backtrack ~ (name.backtrack.? ~ variableDefinitions.backtrack.?) ~ directives.backtrack.? ~ selectionSet).map {
       case (((operationType, (name, variableDefinitions)), directives), selection) =>
-        OperationDefinition(operationType, name, variableDefinitions.getOrElse(Nil), directives, selection)
-    } | P.defer(selectionSet).map(selection => OperationDefinition(OperationType.Query, None, Nil, Nil, selection))
+        OperationDefinition(operationType, name, variableDefinitions.getOrElse(Nil), directives.getOrElse(Nil), selection)
+    } orElse P.defer(selectionSet.backtrack).map(selection => OperationDefinition(OperationType.Query, None, Nil, Nil, selection)))
 
   private def fragmentDefinition: P[FragmentDefinition] =
-    P.defer(P.string("fragment") *> fragmentName ~ typeCondition ~ directives ~ selectionSet).map {
-      case (((name, typeCondition), dirs), sel) => FragmentDefinition(name, typeCondition, dirs, sel)
+    P.defer(wrapWhitespaces(P.string("fragment")).backtrack *> fragmentName ~ typeCondition ~ directives.backtrack.? ~ selectionSet).map {
+      case (((name, typeCondition), dirs), sel) => FragmentDefinition(name, typeCondition, dirs.getOrElse(Nil), sel)
     }
 
   private def objectTypeDefinition: P[ObjectTypeDefinition] =
-    P.defer((stringValue.? <* P.string("type")).with1 ~ name ~ (implements.? ~ directives.?) ~  fieldDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer((stringValue.backtrack.? <* wrapWhitespaces(P.string("type"))).backtrack.with1 ~ name ~ (implements.backtrack.? ~ directives.backtrack.?) ~  wrapBrackets(fieldDefinition.repSep0(whitespaceWithComment))).map {
       case (((description, name), (implements, directives)), fields) =>
         ObjectTypeDefinition(
           description.map(_.value),
           name,
           implements.getOrElse(Nil),
           directives.getOrElse(Nil),
-          fields.toList
+          fields
         )
     }
 
-  private def implements: P[List[NamedType]] = P.defer(P.string("implements") ~ P.char('&').? *> namedType ~ (P.char('&') *> namedType).rep).map {
-    case (head, tail) => head :: tail.toList
+  private def implements: P[List[NamedType]] = P.defer(wrapWhitespaces(P.string("implements")).backtrack ~ wrapWhitespaces(P.char('&')).backtrack.? *> namedType ~ (wrapWhitespaces(P.char('&')).backtrack *> namedType).rep0).map {
+    case (head, tail) => head :: tail
   }
 
   private def interfaceTypeDefinition: P[InterfaceTypeDefinition] =
-    P.defer(stringValue.?.with1 ~ (P.string("interface") *> name) ~ directives.? ~  fieldDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(stringValue.backtrack.?.with1 ~ (P.string("interface").backtrack *> name) ~ directives.backtrack.? ~  wrapBrackets(fieldDefinition.repSep0(whitespaceWithComment))).map {
       case (((description, name), directives), fields) =>
-        InterfaceTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), fields.toList)
+        InterfaceTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), fields)
     }
 
   private def inputObjectTypeDefinition: P[InputObjectTypeDefinition] =
-    P.defer(stringValue.?.with1 ~ (P.string("input") *> name) ~ directives.? ~ argumentDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(stringValue.backtrack.?.with1 ~ (P.string("input").backtrack *> name) ~ directives.backtrack.? ~ wrapBrackets(argumentDefinition.rep0)).map {
       case (((description, name), directives), fields) =>
-        InputObjectTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), fields.toList)
+        InputObjectTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), fields)
     }
 
   private def enumValueDefinition: P[EnumValueDefinition] =
-    P.defer(stringValue.?.with1 ~ name ~ directives.?).map {
+    P.defer(stringValue.backtrack.?.with1 ~ name ~ directives.backtrack.?).map {
       case ((description, enumValue), directives) =>
         EnumValueDefinition(description.map(_.value), enumValue, directives.getOrElse(Nil))
     }
@@ -284,29 +361,29 @@ object Parser2 {
   private def enumName: P[String] = name.filter(s => s != "true" && s != "false" && s != "null")
 
   private def enumTypeDefinition: P[EnumTypeDefinition] =
-    P.defer(stringValue.?.with1 ~ (P.string("enum") *> enumName) ~ directives.? ~  enumValueDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(stringValue.backtrack.?.with1 ~ (P.string("enum").backtrack *> enumName) ~ directives.? ~  wrapBrackets(enumValueDefinition.repSep0(whitespaceWithComment))).map {
       case (((description, name), directives), enumValuesDefinition) =>
-        EnumTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), enumValuesDefinition.toList)
+        EnumTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), enumValuesDefinition)
     }
 
   private def unionTypeDefinition: P[UnionTypeDefinition] =
-    P.defer(stringValue.?.with1 ~ (P.string("union") *>name) ~ (directives.? <* P.char('=')) ~ (P.char('|').? *> namedType) ~ (P.char('|') *> namedType).rep).map {
+    P.defer(stringValue.backtrack.?.with1 ~ (P.string("union").backtrack *>name) ~ (directives.? <* P.char('=')) ~ (P.char('|').? *> namedType) ~ (P.char('|') *> namedType).rep).map {
       case ((((description, name), directives), m), ms) =>
         UnionTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil), (m :: ms.toList).map(_.name))
     }
 
   private def scalarTypeDefinition: P[ScalarTypeDefinition] =
-    P.defer(stringValue.?.with1 ~ (P.string("scalar") *> name) ~ directives.?).map {
+    P.defer(stringValue.backtrack.?.with1 ~ (P.string("scalar").backtrack *> name) ~ directives.?).map {
       case ((description, name), directives) =>
         ScalarTypeDefinition(description.map(_.value), name, directives.getOrElse(Nil))
     }
 
-  private def rootOperationTypeDefinition: P[(OperationType, NamedType)] = P.defer((operationType <* P.char(':')) ~ namedType)
+  private def rootOperationTypeDefinition: P[(OperationType, NamedType)] = P.defer((operationType <* wrapWhitespaces(P.char(':'))) ~ namedType)
 
   private def schemaDefinition: P[SchemaDefinition] =
-    P.defer((P.string("schema") *> directives.?).with1 ~ rootOperationTypeDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer((P.string("schema") *> directives.backtrack.?).with1 ~ wrapBrackets(rootOperationTypeDefinition.repSep0(whitespaceWithComment))).map {
       case (directives, ops) =>
-        val opsMap = ops.toList.toMap
+        val opsMap = ops.toMap
         SchemaDefinition(
           directives.getOrElse(Nil),
           opsMap.get(OperationType.Query).map(_.name),
@@ -315,10 +392,10 @@ object Parser2 {
         )
     }
 
-  private def schemaExtensionWithOptionalDirectivesAndOperations: P[SchemaExtension] =
-    P.defer(directives.?.with1 ~  rootOperationTypeDefinition.rep.between(P.char('{'),P.char('}'))).map {
+  private def schemaExtensionWithOptionalDirectivesAndOperations: Parser0[SchemaExtension] =
+    P.defer0(directives.backtrack.? ~ wrapBrackets(rootOperationTypeDefinition.repSep0(whitespaceWithComment)).backtrack.?).map {
       case (directives, ops) =>
-        val opsMap = ops.toList.toMap
+        val opsMap = ops.getOrElse(Nil).toMap
         SchemaExtension(
           directives.getOrElse(Nil),
           opsMap.get(OperationType.Query).map(_.name),
@@ -327,31 +404,28 @@ object Parser2 {
         )
     }
 
-  private def schemaExtensionWithDirectives: P[SchemaExtension] =
-    P.defer(directives).map(SchemaExtension(_, None, None, None))
-
   private def schemaExtension: P[SchemaExtension] =
-    P.defer(P.string("extend schema") *> (schemaExtensionWithOptionalDirectivesAndOperations | schemaExtensionWithDirectives))
+    P.defer(wrapWhitespaces(P.string("extend schema")).backtrack *> schemaExtensionWithOptionalDirectivesAndOperations)
 
   private def scalarTypeExtension: P[ScalarTypeExtension] =
-    P.defer(P.string("extend scalar") *> name ~ directives).map {
+    P.defer(wrapWhitespaces(P.string("extend scalar")).backtrack *> name ~ directives).map {
       case (name, directives) =>
         ScalarTypeExtension(name, directives)
     }
 
   private def objectTypeExtensionWithOptionalInterfacesOptionalDirectivesAndFields: P[ObjectTypeExtension] =
-    P.defer(name ~ (implements.? ~ directives.?) ~ fieldDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(name ~ (implements.backtrack.? ~ directives.backtrack.?) ~ wrapBrackets(fieldDefinition.repSep0(whitespaceWithComment)).backtrack.?).map {
       case ((name, (implements, directives)), fields) =>
         ObjectTypeExtension(
           name,
           implements.getOrElse(Nil),
           directives.getOrElse(Nil),
-          fields.toList
+          fields.getOrElse(Nil)
         )
     }
 
   private def objectTypeExtensionWithOptionalInterfacesAndDirectives: P[ObjectTypeExtension] =
-    P.defer(name ~ implements.? ~ directives ~ (!fieldDefinition.rep.between(P.char('{'),P.char('}')))).map {
+    P.defer(name.backtrack ~ implements.backtrack.? ~ directives.backtrack ~ (!wrapBrackets(fieldDefinition.repSep0(whitespaceWithComment)))).map {
       case (((name, implements), directives),_) =>
         ObjectTypeExtension(
           name,
@@ -374,80 +448,54 @@ object Parser2 {
 
   private def objectTypeExtension: P[ObjectTypeExtension] =
     P.defer(
-      P.string("extend type") *> (
-        objectTypeExtensionWithOptionalInterfacesOptionalDirectivesAndFields orElse
-          objectTypeExtensionWithOptionalInterfacesAndDirectives orElse
-          objectTypeExtensionWithInterfaces
+      wrapWhitespaces(P.string("extend type")).backtrack *> (
+        objectTypeExtensionWithOptionalInterfacesOptionalDirectivesAndFields // orElse
+//          objectTypeExtensionWithOptionalInterfacesAndDirectives orElse
+//          objectTypeExtensionWithInterfaces
         )
     )
 
   private def interfaceTypeExtensionWithOptionalDirectivesAndFields: P[InterfaceTypeExtension] =
-    P.defer(name ~ directives.? ~ fieldDefinition.rep.between(P.char('{'),P.char('}'))).map {
-      case ((name, directives), fields) =>
-        InterfaceTypeExtension(name, directives.getOrElse(Nil), fields.toList)
+    P.defer(name ~ (directives.backtrack.? ~ wrapBrackets(fieldDefinition.repSep0(whitespaceWithComment)).backtrack.?)).map {
+      case (name, (directives, fields)) =>
+        InterfaceTypeExtension(name, directives.getOrElse(Nil), fields.getOrElse(Nil))
     }
 
-  private def interfaceTypeExtensionWithDirectives: P[InterfaceTypeExtension] =
-    P.defer(name ~ directives).map {
-      case (name, directives) =>
-        InterfaceTypeExtension(name, directives, Nil)
-    }
 
   private def interfaceTypeExtension: P[InterfaceTypeExtension] =
     P.defer(
-      P.string("extend interface") *> (
-        interfaceTypeExtensionWithOptionalDirectivesAndFields |
-          interfaceTypeExtensionWithDirectives
-        )
+      wrapWhitespaces(P.string("extend interface")).backtrack *> interfaceTypeExtensionWithOptionalDirectivesAndFields
     )
 
   private def unionTypeExtensionWithOptionalDirectivesAndUnionMembers: P[UnionTypeExtension] =
-    P.defer(name ~ (directives.? <* P.char('=')) ~ (P.char('|').? *> namedType) ~ (P.char('|') *> namedType).rep).map {
+    (name.backtrack ~ (directives.backtrack.? <* wrapWhitespaces(P.char('=')).backtrack.?) ~ (wrapWhitespaces(P.char('|')).backtrack.? *> namedType.backtrack.?) ~ (wrapWhitespaces(P.char('|')).backtrack *> namedType).rep0).map {
       case (((name, directives), m), ms) =>
-        UnionTypeExtension(name, directives.getOrElse(Nil), (m :: ms.toList).map(_.name))
-    }
-
-  private def unionTypeExtensionWithDirectives: P[UnionTypeExtension] =
-    P.defer(name ~ directives).map {
-      case (name, directives) =>
-        UnionTypeExtension(name, directives, Nil)
+        UnionTypeExtension(name, directives.getOrElse(Nil), m.map(_ :: ms).getOrElse(ms).map(_.name))
     }
 
   private def unionTypeExtension: P[UnionTypeExtension] =
-    P.defer(P.string("extend union") *> (unionTypeExtensionWithOptionalDirectivesAndUnionMembers | unionTypeExtensionWithDirectives))
+    P.defer(wrapWhitespaces(P.string("extend union")).backtrack *> unionTypeExtensionWithOptionalDirectivesAndUnionMembers)
 
   private def enumTypeExtensionWithOptionalDirectivesAndValues: P[EnumTypeExtension] =
-    P.defer(enumName ~ directives.? ~ enumValueDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(enumName ~ directives.?.backtrack ~ wrapBrackets(enumValueDefinition.repSep0(whitespaceWithComment)).backtrack.?).map {
       case ((name, directives), enumValuesDefinition) =>
-        EnumTypeExtension(name, directives.getOrElse(Nil), enumValuesDefinition.toList)
-    }
-
-  private def enumTypeExtensionWithDirectives: P[EnumTypeExtension] =
-    P.defer(enumName ~ directives).map {
-      case (name, directives) =>
-        EnumTypeExtension(name, directives, Nil)
+        EnumTypeExtension(name, directives.getOrElse(Nil), enumValuesDefinition.getOrElse(Nil))
     }
 
   private def enumTypeExtension: P[EnumTypeExtension] =
-    P.defer(P.string("extend enum") *> (enumTypeExtensionWithOptionalDirectivesAndValues | enumTypeExtensionWithDirectives))
+    P.defer(wrapWhitespaces(P.string("extend enum")).backtrack *> enumTypeExtensionWithOptionalDirectivesAndValues)
 
   private def inputObjectTypeExtensionWithOptionalDirectivesAndFields: P[InputObjectTypeExtension] =
-    P.defer(name ~ directives.? ~ argumentDefinition.rep.between(P.char('{'),P.char('}'))).map {
+    P.defer(name ~ directives.backtrack.? ~ wrapBrackets(argumentDefinition.rep0).backtrack.?).map {
       case ((name, directives), fields) =>
-        InputObjectTypeExtension(name, directives.getOrElse(Nil), fields.toList)
-    }
-
-  private def inputObjectTypeExtensionWithDirectives: P[InputObjectTypeExtension] =
-    P.defer(name ~ directives).map {
-      case (name, directives) =>
-        InputObjectTypeExtension(name, directives, Nil)
+        InputObjectTypeExtension(name, directives.getOrElse(Nil), fields.getOrElse(Nil))
     }
 
   private def inputObjectTypeExtension: P[InputObjectTypeExtension] =
     P.defer(
-      P.string("extend input") *> (
-        inputObjectTypeExtensionWithOptionalDirectivesAndFields orElse
-          inputObjectTypeExtensionWithDirectives
+      wrapWhitespaces(P.string("extend input")).backtrack *> (
+        inputObjectTypeExtensionWithOptionalDirectivesAndFields
+          //orElse inputObjectTypeExtensionWithDirectives
         )
     )
 
@@ -514,7 +562,7 @@ object Parser2 {
     typeDefinition orElse schemaDefinition orElse directiveDefinition
 
   private def executableDefinition: P[ExecutableDefinition] =
-    P.defer(operationDefinition orElse fragmentDefinition)
+    P.defer(operationDefinition | fragmentDefinition)
 
   private def typeExtension: P[TypeExtension] =
     objectTypeExtension orElse
@@ -529,7 +577,7 @@ object Parser2 {
 
   private def definition: P[Definition] = executableDefinition orElse typeSystemDefinition orElse typeSystemExtension
 
-  private def document: P[ParsedDocument] =
+  def document: P[ParsedDocument] =
     P.defer((P.start.with1 *> definition.rep) <* P.end).map(seq => ParsedDocument(seq.toList))
 
   /**
@@ -537,17 +585,10 @@ object Parser2 {
    */
   def parseQuery(query: String): IO[ParsingError, Document] = {
     val sm = SourceMapper(query)
-    println("=====small====")
-    println(selectionSet.parse(query))
     document.parse(query) match {
       case Left(error) =>
-        println("============ERROR============")
-        println(error)
-        println(sm.getLocation(error.failedAtOffset))
         IO.fail(ParsingError(error.toString, Some(sm.getLocation(error.failedAtOffset))))
       case Right(result) =>
-        println("===========SUCCESS==========")
-        println(result)
         IO.succeed(Document(result._2.definitions,sm))
     }
 //    Task(document.parse(query))

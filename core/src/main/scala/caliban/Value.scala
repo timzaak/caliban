@@ -103,19 +103,19 @@ object Value {
       override def toInt: Int       = value
       override def toLong: Long     = value.toLong
       override def toBigInt: BigInt = BigInt(value)
-      override def toString: String = value.toString
+      override def toString: String = s"IntNumber(${value.toString})"
     }
     case class LongNumber(value: Long)     extends IntValue {
       override def toInt: Int       = value.toInt
       override def toLong: Long     = value
       override def toBigInt: BigInt = BigInt(value)
-      override def toString: String = value.toString
+      override def toString: String = s"LongNumber(${value.toString})"
     }
     case class BigIntNumber(value: BigInt) extends IntValue {
       override def toInt: Int       = value.toInt
       override def toLong: Long     = value.toLong
       override def toBigInt: BigInt = value
-      override def toString: String = value.toString
+      override def toString: String = s"BigIntNumber(${value.toString})"
     }
   }
 
@@ -129,19 +129,19 @@ object Value {
       override def toFloat: Float           = value
       override def toDouble: Double         = value.toDouble
       override def toBigDecimal: BigDecimal = BigDecimal.decimal(value)
-      override def toString: String         = value.toString
+      override def toString: String         = s"FloatNumber(${value.toString})"
     }
     case class DoubleNumber(value: Double)         extends FloatValue {
       override def toFloat: Float           = value.toFloat
       override def toDouble: Double         = value
       override def toBigDecimal: BigDecimal = BigDecimal(value)
-      override def toString: String         = value.toString
+      override def toString: String         = s"DoubleNumber(${value.toString})"
     }
     case class BigDecimalNumber(value: BigDecimal) extends FloatValue {
       override def toFloat: Float           = value.toFloat
       override def toDouble: Double         = value.toDouble
       override def toBigDecimal: BigDecimal = value
-      override def toString: String         = value.toString
+      override def toString: String         = s"BigDecimalNumber(${value.toString})"
     }
   }
 }
