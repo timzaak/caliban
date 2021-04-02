@@ -12,7 +12,6 @@ import caliban.parsing.adt.OperationType.{Mutation, Query}
 import caliban.parsing.adt.Selection.{Field, FragmentSpread, InlineFragment}
 import caliban.parsing.adt.Type.{ListType, NamedType}
 import caliban.parsing.adt._
-import zio.ZIO
 import zio.test.Assertion._
 import zio.test._
 import zio.test.environment.TestEnvironment
