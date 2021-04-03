@@ -534,7 +534,7 @@ object Parser2 {
   private def definition: P[Definition] = P.oneOf(executableDefinition::typeSystemDefinition::typeSystemExtension::Nil)
 
   def document: Parser0[ParsedDocument] =
-    P.defer0(P.start *> whitespaceWithComment *> definition.repSep(whitespaceWithComment) <* whitespaceWithComment <* P.end).map(seq => ParsedDocument(seq.toList))
+    P.defer0(P.start *> whitespaceWithComment *> definition.repSep0(whitespaceWithComment) <* whitespaceWithComment <* P.end).map(seq => ParsedDocument(seq))
 
   /**
    * Parses the given string into a [[caliban.parsing.adt.Document]] object or fails with a [[caliban.CalibanError.ParsingError]].
